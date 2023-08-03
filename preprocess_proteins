@@ -1,0 +1,64 @@
+# imports
+import scanpy as sc, anndata
+import pandas as pd, time
+import numpy as np
+import torch
+import esm
+import gget
+
+# get latent space
+# Load ESM-1 model
+
+model, alphabet = esm.pretrained.esm1_t6_43M_UR50S()
+
+batch_converter = alphabet.get_batch_converter()
+model.eval()  # disables dropout for deterministic results
+
+df = pd.read_csv("uniprot-proteins.tsv", sep="\t")
+
+data = []
+
+for i in range(100):
+    try:
+        seq_list = gget.seq(df["To"][i], translate=True)
+    except Exception as e:
+        print(e)
+
+    if (len(seq_list) > 0):
+        data.append(("protein" + str(i + 1), seq_list[1]))
+
+batch_labels, batch_strs, batch_tokens = batch_converter(data)
+
+# Extract per-residue representations (on CPU)
+with torch.no_grad():
+    results = model(batch_tokens, repr_layers=[6], return_contacts=True)
+token_representations = results["representations"][6]
+
+# Generate per-sequence representations via averaging
+# NOTE: token 0 is always a beginning-of-sequence token, so the first residue is token 1.
+sequence_representations = []
+for i, (_, seq) in enumerate(data):
+    sequence_representations.append(token_representations[i, 1 : len(seq) + 1].mean(0).tolist())
+
+# create anndata_all object
+anndata_all = anndata.AnnData(X=np.array(sequence_representations))
+
+itime = time.time()
+# Do PCA for denoising and dimensionality reduction
+sc.pp.pca(anndata_all, n_comps=10)
+print("PCA computed. Time: {}".format(time.time() - itime))
+
+# Compute neighborhood graph in PCA space
+sc.pp.neighbors(anndata_all)
+print("Neighbors computed. Time: {}".format(time.time() - itime))
+
+# Compute UMAP using neighborhood graph
+sc.tl.umap(anndata_all)
+print("UMAP calculated. Time: {}".format(time.time() - itime))
+
+sc.pl.umap(anndata_all, s=4) # color='Molecular weight',
+
+anndata_all.obs['x'] = anndata_all.obsm['X_umap'][:, 0]
+anndata_all.obs['y'] = anndata_all.obsm['X_umap'][:, 1]
+anndata_all.write('proteins.h5')
+print("Data written. Time: {}".format(time.time() - itime))
